@@ -1,6 +1,7 @@
 # __author: Bao Li__ #
 import numpy as np
 from math import sin, cos, pi
+from scipy.optimize import minimize
 
 
 def bar(E, A, L, phi):
@@ -116,8 +117,12 @@ def truss(A):
     mass = np.sum(rho * A * L)
 
     # stiffness and stress matrices
-    K = np.zeros((DOF * n, DOF * n))
-    S = np.zeros((nbar, DOF * n))
+    if func == complex_step:
+        K = np.zeros((DOF * n, DOF * n), dtype=complex)
+        S = np.zeros((nbar, DOF * n), dtype=complex)
+    else:
+        K = np.zeros((DOF * n, DOF * n))
+        S = np.zeros((nbar, DOF * n))
 
     for i in range(nbar):  # loop through each bar
 
@@ -153,6 +158,77 @@ def truss(A):
     stress = np.dot(S, d).reshape(nbar)
 
     return mass, stress
+
+
+def FD_forward(f, x):
+    # dmass_dA : ndarray of length 10: derivative of mass w.r.t. each A
+    f_0 = np.append(f(x)[0], f(x)[1])
+    n_in = len(x)
+    n_out = len(f_0)
+    J = np.zeros((n_out, n_in))
+    h = 1e-6
+
+    for i in range(n_out):
+        for j in range(n_in):
+            dota_x = max(h, h * x[j])
+            x[j] += dota_x
+            f_plus = np.append(f(x)[0], f(x)[1])
+            J[i, j] = (f_plus[i] - f_0[i]) / dota_x
+            x[j] -= dota_x
+
+    J_m = J[0, :]
+    J_s = J[1:]
+
+    return J_m, J_s
+
+
+def FD_central(f, x):
+    # dmass_dA : ndarray of length 10: derivative of mass w.r.t. each A
+    f_0 = np.append(f(x)[0], f(x)[1])
+    n_in = len(x)
+    n_out = len(f_0)
+    J = np.zeros((n_out, n_in))
+    h = 1e-4
+
+    for i in range(n_out):
+        for j in range(n_in):
+            dota_x = max(h, h * x[j])
+            x[j] += dota_x
+            f_plus = np.append(f(x)[0], f(x)[1])
+            x[j] -= 2 * dota_x
+            f_minus = np.append(f(x)[0], f(x)[1])
+            J[i, j] = (f_plus[i] - f_minus[i]) / (2 * dota_x)
+            x[j] += dota_x
+
+    J_m = J[0, :]
+    J_s = J[1:]
+
+    return J_m, J_s
+
+
+def complex_step(f, x):
+    x = np.array(x, dtype=complex)
+
+    # dmass_dA : ndarray of length 10: derivative of mass w.r.t. each A
+    f_0 = np.append(f(x)[0], f(x)[1])
+    n_in = len(x)
+    n_out = len(f_0)
+    J = np.zeros((n_out, n_in), dtype=complex)
+    h = 1e-30
+
+    for i in range(n_out):
+        for j in range(n_in):
+            x[j] += complex(0, h)
+            y = np.zeros((1, 11), dtype=complex)
+            y[0, 0] = f(x)[0]
+            y[0, 1:11] = f(x)[1]
+            J[i, j] = y[0, i].imag / h
+            x[j] -= complex(0, h)
+
+    J_m = J[0, :]
+    J_s = J[1:]
+
+    return J_m, J_s
 
 
 def adjoint(f, x):
@@ -229,3 +305,169 @@ def adjoint(f, x):
         dstressdA[:, i] = dstress_dA[:, 0]
 
     return dmassdA, dstressdA
+
+
+def tenbartruss(A, grad_type):
+    """This is the subroutine for the 10-bar truss.  You will need to complete it.
+
+    Parameters
+    ----------
+    A : ndarray of length 10
+        cross-sectional areas of all the bars
+    grad_type : string (optional)
+        gradient type.  'FD' for finite difference, 'CS' for complex step,
+        'AJ' for adjoint
+
+    Outputs
+    -------
+    mass : float
+        mass of the entire structure
+    stress : ndarray of length 10
+        stress of each bar
+    dmass_dA : ndarray of length 10
+        derivative of mass w.r.t. each A
+    dstress_dA : 10 x 10 ndarray
+        dstress_dA[i, j] is derivative of stress[i] w.r.t. A[j]
+
+    """
+    # --- setup 10 bar truss ----
+
+    # we need setup (start, finish, phi, L, E, rho, Fx, Fy, rigid)
+    # we have n = 6 nodes, m = 10 elements
+    # n = len(Fx) = 6 # number of nodes
+    # DOF = 2  # number of degrees of freedom
+    # nbar = len(A) = 10  # number of bars
+
+    # --- call truss function ----
+    mass, stress = truss(A)
+    # --- compute derivatives for provided grad_type ----
+    J_m, J_s = grad_type(f=truss, x=A)
+    dmass_dA = J_m
+    dstress_dA = J_s
+
+    if grad_type == complex_step:
+        stress = np.array(stress.real, dtype=float)
+        dmass_dA = np.array(dmass_dA.real, dtype=float)
+        dstress_dA = np.array(dstress_dA.real, dtype=float)
+
+    return mass, stress, dmass_dA, dstress_dA
+
+
+# 3.1 test
+grad_type = [FD_forward,FD_central, complex_step]
+
+
+for _, func in enumerate(grad_type):
+    FUNCCALLS = 0
+
+    A = np.ones(10)*5*1e-4
+    mass0, stress0, dmass_dA0, dstress_dA0 = tenbartruss(A, adjoint)
+    mass, stress, dmass_dA, dstress_dA = tenbartruss(A, func)
+    error = np.zeros((10))
+    merror = 0
+    for i in range(10):
+
+        error[i] = (dmass_dA[i] - dmass_dA0[i])/dmass_dA0[i]
+        merror += error[i]
+    aerror = merror/10
+    print(aerror)
+
+for _, func in enumerate(grad_type):
+    FUNCCALLS = 0
+
+    A = np.ones(10) * 5 * 1e-2
+    mass0, stress0, dmass_dA0, dstress_dA0 = tenbartruss(A, adjoint)
+    mass, stress, dmass_dA, dstress_dA = tenbartruss(A, func)
+    error = np.zeros((10,10))
+    merror = 0
+    for i in range(10):
+        for j in range(10):
+            error[i,j] = (dstress_dA[i,j] - dstress_dA0[i,j])/dstress_dA0[i,j]
+            merror += error[i,j]
+
+    aerror = merror/100
+    print(aerror)
+
+
+# 3.2 Truss Optimization
+# Define objective function
+x_hist = []
+f_hist = []
+c_ineq_hist = []
+
+
+grad = adjoint
+
+FUNCCALLS = 0
+
+# a = 0.00000000001
+a = 0.0000000001
+def obj(x):
+    """The objective function"""
+    # Append current x value to our history list
+    x_hist.append(x.copy())
+    mass, _, _, _ = tenbartruss(x, grad)
+
+    # Append current f value to our history list
+
+    f_hist.append(mass)
+
+    c = mass*a
+    print(mass)
+    return c
+
+
+# Provide scipy the objective gradient (jacobian)
+def jac_obj(x):
+    """The gradient of the objective function"""
+    _, _, dmass_dA, _ = tenbartruss(x, grad)
+    c = dmass_dA*a
+    return c
+
+def con_ineq(x):
+
+    c = np.zeros(10)
+    _, stress, _, _ = tenbartruss(x, grad)
+
+    for i in range(10):
+        if i == 8:
+            if stress[i] > 0:
+                c[i] = 520*10**6 - stress[i]
+            else:
+                c[i] = stress[i] + 520*10**6
+        else:
+            if stress[i] > 0:
+                c[i] = 170*10**6 - stress[i]
+            else:
+                c[i] = stress[i] + 170*10**6
+
+    c_ineq_hist.append(c.copy())
+    print(stress)
+    return c
+
+
+def jac_con_ineq(x):
+    _, _, _, dstress_dA = tenbartruss(x, grad)
+    return dstress_dA
+
+
+ineq_cons = {'type': 'ineq', 'jac': jac_con_ineq,
+             'fun': con_ineq}
+
+
+# Some available Scipy.optimize algorithms
+method = 'slsqp'
+# Initial design variable
+x0 = np.ones(10) * 2*10**-4
+# Design variable bounds
+#    ((x0_l, x0_u),  (x1_l, x1_u))
+bnds = ((5e-5, 1), (5e-5, 1), (5e-5, 1), (5e-5, 1),
+        (5e-5, 1), (5e-5, 1), (5e-5, 1), (5e-5, 1),
+        (5e-5, 1), (5e-5, 1))
+
+# Now we provide constraint information as well..
+res = minimize(obj, x0, jac=jac_obj, method=method, bounds=bnds,
+                 constraints=ineq_cons,options={'ftol':1e-8, 'disp':True})
+print(res)
+print(FUNCCALLS)
+print(f_hist)
